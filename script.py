@@ -24,9 +24,9 @@ from datetime import datetime
 # All configurable parameters are here, no need to modify core code | 所有可配置参数均在此处，无需修改核心代码
 CONFIG = {
     # File Path Configuration | 文件路径配置
-    "input_excel_path": "url_list.xlsx",  # Input Excel with URL list | 输入URL的Excel文件路径
-    "output_excel_path": "url_jump_result.xlsx",  # Output Excel with results | 输出结果的Excel文件路径
-    "input_sheet_name": "input_url",  # Input sheet name | 输入Sheet名称
+    "input_excel_path": "URL_FR.xlsx",  # Input Excel with URL list | 输入URL的Excel文件路径
+    "output_excel_path": "URL_FR_result.xlsx",  # Output Excel with results | 输出结果的Excel文件路径
+    "input_sheet_name": "Feuil1",  # Input sheet name | 输入Sheet名称
     "summary_sheet_name": "output_url",  # Summary result sheet | 输出汇总Sheet名称
     "detail_sheet_name": "jump_chain",  # Jump detail sheet | 输出详情Sheet名称
 
