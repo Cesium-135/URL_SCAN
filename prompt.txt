@@ -1,0 +1,64 @@
+PLEASE NOTE:
+Since I had multiple rounds of conversations with the LLM, to modify the code step by step to meet our needs, 
+And it's also in Chinese, so it is difficult to provide the original prompt accurately to you.
+So I ask the LLM to help me summarize all the context and requirements in English, as a complete prompt that can be used to re-generate code.
+
+1. Basic Task Overview
+Write a complete Python script that reads a list of URLs from an Excel file, simulates manual browser access to each URL, records the full redirection path of each jump, classifies each URL and jump step according to specified rules, and exports the results to a structured Excel file with two sheets (summary and detail). The script must support automatic redirection and manual click-triggered redirection, adapt to bilingual English/French pages, and include detailed bilingual comments.
+
+2. Core Function Requirements
+Read URLs from input Excel: url_list.xlsx, sheet named 'input_url', cell begin from A1
+Standardize and validate URLs, auto-complement http/https, deduplicate.
+Simulate real browser access, capture full jump chain: server 3xx redirect, JS/meta client redirect, page navigation.
+Support simulating user clicks to trigger jumps (for buttons/links leading to Espace or login).
+Capture jumps in new windows/tabs opened after click.
+Implement breakpoint resume: skip processed URLs to avoid duplicate execution.
+Support retry mechanism for failed access; single URL failure shall not interrupt the whole task.
+Export results to Excel with two sheets: summary table and jump detail table.
+
+3. URL Classification Rules (Strict)
+Classify each jump step into 4 levels in the following order:
+Public front – public entrance page
+Espace – business space page (after front-end, before authentication)
+Authentication – login/security module (login page, token, IAM, SSO)
+Backend/API – back-end service, API interface/gateway
+All classification and element matching only support English and French, no Chinese.
+
+4. Click Simulation & Element Location Rules
+Automatically locate clickable elements for Espace access and login in bilingual EN/FR.
+Priority: attribute matching → text matching → role matching.
+Support keywords:
+Login: Login, Sign in, Connexion, Se connecter
+Espace: Espace, My espace, Accéder à l'espace, Entrer
+Simulate real user behavior: scroll into view, wait visible & enabled, normal click.
+After click, wait for network idle and continue capturing the jump chain.
+Merge the pre-click and post-click jump chains into one complete path.
+
+5. Jump Scenarios to Support
+Automatic redirection (direct jump after entering URL: 3xx, JS, meta).
+Click-triggered jump (must click button/link to go to Espace/login).
+Jumps within the same tab & jumps in new windows/tabs.
+Internal systems with HTTPS/self-signed certificates (ignore SSL errors).
+Delayed jumps & single-page application (SPA) front-end routing jumps.
+
+6. Code & Output Requirements
+Use Playwright for browser automation (stable for JS rendering and jumps).
+Use openpyxl for Excel reading and writing.
+All code functions with detailed Chinese-English bilingual comments.
+Global configuration at the top for easy modification without changing core logic.
+Output Excel includes:
+Summary: raw URL, final URL, jump count, full path, main classification, click triggered or not, status.
+Detail: each jump step, URL, type, trigger method (auto/click), classification, timestamp.
+Friendly console log, execution statistics, clear error messages.
+
+7. Constraints & Environment
+English
+Target environment: Windows, Python 3.8+.
+No Chinese elements or page matching; only EN/FR.
+Can be packaged into a standalone EXE using PyInstaller for distribution.
+Playwright Chromium browser required; support proxy and headless mode.
+
+
+
+Simplified English Vesion (for re-generating code)
+Write a Python script using Playwright and openpyxl to read URLs from Excel, simulate browser access, capture full redirection chain including auto redirect and click-triggered redirect to Espace/login, classify into Public front → Espace → Authentication → Backend/API, support EN/FR pages only, record full jump path, merge click jump chain, export summary and detail Excel, with breakpoint resume, retry, bilingual comments.
