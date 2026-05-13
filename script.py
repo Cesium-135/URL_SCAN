@@ -24,8 +24,8 @@ from datetime import datetime
 # All configurable parameters are here, no need to modify core code | 所有可配置参数均在此处，无需修改核心代码
 CONFIG = {
     # File Path Configuration | 文件路径配置
-    "input_excel_path": "URL_FR.xlsx",  # Input Excel with URL list | 输入URL的Excel文件路径
-    "output_excel_path": "URL_FR_result.xlsx",  # Output Excel with results | 输出结果的Excel文件路径
+    "input_excel_path": "URL_CORE.xlsx",  # Input Excel with URL list | 输入URL的Excel文件路径
+    "output_excel_path": "URL_CORE_result.xlsx",  # Output Excel with results | 输出结果的Excel文件路径
     "input_sheet_name": "Feuil1",  # Input sheet name | 输入Sheet名称
     "summary_sheet_name": "output_url",  # Summary result sheet | 输出汇总Sheet名称
     "detail_sheet_name": "jump_chain",  # Jump detail sheet | 输出详情Sheet名称
@@ -283,7 +283,7 @@ def get_processed_urls() -> set:
     """
     Get already processed URLs for breakpoint resume
     功能：读取已处理完成的URL，实现断点续跑，避免重复处理
-    :return: Set of successfully processed URLs | 已处理成功的URL集合
+    :return: Set of successfully processed URLs | 已Success/处理成功的URL集合
     """
     if not os.path.exists(CONFIG["output_excel_path"]):
         return set()
@@ -296,7 +296,7 @@ def get_processed_urls() -> set:
         for row in summary_ws.iter_rows(min_row=2, values_only=True):
             raw_url = row[1]
             status = row[8]
-            if raw_url and status == "处理成功":
+            if raw_url and status == "Success/处理成功":
                 processed_urls.add(raw_url)
         wb.close()
         return processed_urls
@@ -330,7 +330,7 @@ def capture_url_jump_chain(context, raw_url: str) -> tuple[list, dict]:
         "main_classify": "Public front",
         "click_triggered": "否",
         "click_element_desc": "",
-        "status": "处理成功",
+        "status": "Success/处理成功",
         "error_msg": "",
         "finish_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
@@ -496,10 +496,10 @@ def capture_url_jump_chain(context, raw_url: str) -> tuple[list, dict]:
 
     # -------------------------- Exception Handling | 异常捕获处理 --------------------------
     except PlaywrightTimeoutError:
-        summary_info["status"] = "处理失败"
+        summary_info["status"] = "Failure/处理失败"
         summary_info["error_msg"] = "Page access timeout, exceed max waiting time"
     except Exception as e:
-        summary_info["status"] = "处理失败"
+        summary_info["status"] = "Failure/处理失败"
         summary_info["error_msg"] = f"Access exception: {str(e)}"
     finally:
         # Remove listeners, release resources | 移除监听器，释放资源
@@ -640,7 +640,7 @@ def main():
                     write_result_to_excel(summary_info, jump_chain)
 
                     # Statistics | 处理结果统计
-                    if summary_info["status"] == "处理成功":
+                    if summary_info["status"] == "Success/处理成功":
                         handle_success = True
                         success_count += 1
                         print(
@@ -664,7 +664,7 @@ def main():
                     "main_classify": "",
                     "click_triggered": "否",
                     "click_element_desc": "",
-                    "status": "处理失败",
+                    "status": "Failure/处理失败",
                     "error_msg": f"Failed after {CONFIG['max_retry_times']} retries",
                     "finish_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
