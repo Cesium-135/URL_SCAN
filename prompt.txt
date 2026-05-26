@@ -1,3 +1,4 @@
+V1 Prompt
 PLEASE NOTE:
 Since I had multiple rounds of conversations with the LLM, to modify the code step by step to meet our needs, 
 And it's also in Chinese, so it is difficult to provide the original prompt accurately to you.
@@ -62,3 +63,19 @@ Playwright Chromium browser required; support proxy and headless mode.
 
 Simplified English Vesion (for re-generating code)
 Write a Python script using Playwright and openpyxl to read URLs from Excel, simulate browser access, capture full redirection chain including auto redirect and click-triggered redirect to Espace/login, classify into Public front → Espace → Authentication → Backend/API, support EN/FR pages only, record full jump path, merge click jump chain, export summary and detail Excel, with breakpoint resume, retry, bilingual comments.
+
+
+V2 Prompt
+这个仓库里script.py是我现在版本的URL扫描脚本，帮我分析它。
+这段脚本现在存在以下问题：
+1.脚本的输入方式太原始，文件路径配置仍是写死的，不方便调试与部署。请帮我修改为可以指定路径输入输出的方式，并有相关中英文提示。如果未提供路径则要求输入。
+2.脚本中的注释、输出提示、最终结果文件的标题与分类，都存在只有中文的情况。帮我做严格中英文输出。
+3.脚本存在一些未处理的问题，例如有些页面初次访问时要求同意cookie，但现有脚本未处理，导致页面卡住无法处理。
+4.脚本无法处理一些其他情况：有些后台管理页面访问时即要求提供账号密码/证书，虽然脚本无法处理，但需要记录这些，并且保证访问后能正常关闭浏览器。
+5.脚本对于访问错误的URL，希望有更详细的分类，可以把Error message里的错误码比如ERR_CONNECTION_CLOSED单独一列记录下来，每一类都要清楚地记录原始错误码。
+6.现有分类过于粗放，只有Authentication、Espace、Public front和Backend/API，对于每一类，现有大类分类已经不错。我还希望能更详细的分类，但我不知道以什么依据。
+7.脚本未来计划在云服务器上部署，因此需要修改输入输出以适配。
+8.当脚本运行完成后，可以输出详细的统计数据，包括各类URL分类的数量、占比图表、日志等。
+9.这段脚本目前是单线程，现有超时时间配置下，大约每10秒扫描一个URL。将它优化为多线程，以提升扫描速度。
+
+请先阅读我提供的python脚本，结合我的要求，在最小改动现有脚本的前提下，完成优化方案。

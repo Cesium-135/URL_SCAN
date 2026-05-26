@@ -6,7 +6,7 @@ With the help of and generate by Chinese LLMs.
 ## Environment Installation
 Before running the script, you need to run the following commands in a bash shell:
 ```bash
-pip install playwright openpyxl
+pip install playwright openpyxl matplotlib
 ```
 
 ```bash
