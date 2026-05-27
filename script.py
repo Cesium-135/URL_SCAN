@@ -152,6 +152,8 @@ def parse_command_line_args():
     parser = argparse.ArgumentParser(description="URL Scan Tool | URL扫描工具")
     parser.add_argument("-i", "--input", help="Input Excel file path | 输入Excel文件路径")
     parser.add_argument("-o", "--output", help="Output Excel file path | 输出Excel文件路径")
+    parser.add_argument("-s", "--input-sheet",
+                        help="Input Excel sheet name (default: Feuil1) | 输入Excel工作表名称（默认: Feuil1）")
     args = parser.parse_args()
 
     if not args.input:
@@ -162,6 +164,12 @@ def parse_command_line_args():
     if not args.output:
         default_output = f"URL_SCAN_RESULT_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         args.output = input(f"Please enter output Excel path (default: {default_output}): ").strip() or default_output
+
+    if args.input_sheet:
+        CONFIG["input_sheet_name"] = args.input_sheet
+        logger.info(f"Using user-specified sheet name: '{args.input_sheet}'")
+    else:
+        logger.info(f"No sheet name specified, using default: '{CONFIG['input_sheet_name']}'")
 
     CONFIG["input_excel_path"] = args.input
     CONFIG["output_excel_path"] = args.output
@@ -178,7 +186,7 @@ def standardize_url(url: str) -> str:
         parsed = urlparse(url)
     if not parsed.netloc or parsed.scheme not in ["http", "https"]:
         return ""
-    return urlunparse(parsed).rstrip("/")
+    return urlunparse(parsed)
 
 def is_valid_url(url: str) -> bool:
     return bool(url and urlparse(url).scheme in ["http", "https"] and urlparse(url).netloc)
@@ -207,9 +215,9 @@ def classify_url(jump_info: dict) -> tuple:
         _, error_type = extract_error_code(jump_info["error_msg"])
         return "Error", error_type
 
-    url_lower = jump_info.get("jump_url", "").lower()
-    page_html = jump_info.get("page_html", "").lower()
-    request_type = jump_info.get("request_type", "")
+    url_lower = (jump_info.get("jump_url", "") or "").lower()
+    page_html = (jump_info.get("page_html", "") or "").lower()
+    request_type = jump_info.get("request_type", "") or ""
 
     # Authentication
     auth_rule = CONFIG["classify_rules"]["Authentication"]
@@ -268,7 +276,7 @@ def handle_cookie_consent(page):
                     logger.info(f"Clicked cookie consent: {selector}")
                     page.wait_for_timeout(1000)
                     return
-            except:
+            except Exception:
                 pass
     # Try iframes
     try:
@@ -283,13 +291,13 @@ def handle_cookie_consent(page):
                             logger.info(f"Clicked cookie in iframe: {selector}")
                             page.wait_for_timeout(1000)
                             return
-                    except:
+                    except Exception:
                         pass
-    except:
+    except Exception:
         pass
 
 def find_clickable_element(page):
-    """Find element to click for Espace/Login"""
+    """Find element to click for Espace/Login (with text content verification)"""
     click_cfg = CONFIG["click_config"]
     all_keywords = click_cfg["target_keywords"]["auth_login"] + click_cfg["target_keywords"]["espace_access"]
     all_keywords = list(set([kw.lower() for kw in all_keywords]))
@@ -299,8 +307,11 @@ def find_clickable_element(page):
             try:
                 element = page.locator(selector).first
                 if element.is_visible(timeout=1000) and element.is_enabled():
-                    return element, f"Selector: {selector}, Keyword: {kw}"
-            except:
+                    # Verify element text content contains the keyword to reduce false positives
+                    text_content = element.text_content(timeout=500) or ""
+                    if kw.lower() in text_content.lower() or kw.split()[-1].lower() in text_content.lower():
+                        return element, f"Selector: {selector}, Keyword: {kw}"
+            except Exception:
                 continue
     return None, "No matching element"
 
@@ -343,6 +354,7 @@ def scan_single_url(raw_url: str) -> dict:
         context = None
         page = None
         new_page_obj = None
+        initialization_ready = False
         try:
             playwright = sync_playwright().start()
             browser_kwargs = {"headless": CONFIG["headless_mode"]}
@@ -357,23 +369,29 @@ def scan_single_url(raw_url: str) -> dict:
             navigation_events = []
             jump_id = 1
             current_trigger = "Auto Redirect"
+            last_known_url = std_url  # Track the last known URL for accurate from_url
 
             # Listeners
             def on_frame_navigated(frame):
-                nonlocal jump_id, current_trigger
+                nonlocal jump_id, current_trigger, last_known_url
                 if frame == page.main_frame:
                     url = frame.url
+                    # Skip if this URL was already recorded as a 3xx redirect (fix double recording)
+                    if any(ev["jump_url"] == url and ev["jump_type"] == "3xx Redirect" for ev in navigation_events):
+                        last_known_url = url
+                        return
                     if not navigation_events or navigation_events[-1]["jump_url"] != url:
                         navigation_events.append({
                             "jump_id": jump_id,
                             "jump_url": url,
-                            "from_url": page.url if jump_id > 1 else std_url,
+                            "from_url": last_known_url,
                             "jump_type": "Client Navigation",
                             "status_code": 200,
                             "trigger_type": current_trigger,
                             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                         })
                         jump_id += 1
+                    last_known_url = url
 
             def on_response(response):
                 nonlocal jump_id, current_trigger
@@ -393,18 +411,13 @@ def scan_single_url(raw_url: str) -> dict:
                             })
                             jump_id += 1
 
-            def on_page_opened(new_page):
-                nonlocal new_page_obj
-                new_page_obj = new_page
-                logger.info(f"New window opened: {new_page.url}")
-
             page.on("framenavigated", on_frame_navigated)
             page.on("response", on_response)
-            if CONFIG["click_config"]["capture_new_window"]:
-                context.on("page", on_page_opened)
+            # Note: new window capture uses wait_for_event after click (more reliable)
 
             # Step 1: Go to URL
             response = page.goto(std_url, wait_until="networkidle", timeout=CONFIG["timeout"])
+            initialization_ready = True  # Mark init complete to distinguish fatal vs retryable errors
             page.wait_for_timeout(CONFIG["wait_for_network_idle"])
             handle_cookie_consent(page)
 
@@ -420,7 +433,7 @@ def scan_single_url(raw_url: str) -> dict:
                 result["auth_required"] = True
                 logger.info(f"Auth/certificate required: {std_url}")
 
-            # Step 2: Click simulation
+            # Step 2: Click simulation (with reliable new window capture via wait_for_event)
             if CONFIG["click_config"]["enable_click_function"]:
                 element, desc = find_clickable_element(page)
                 if element:
@@ -431,22 +444,31 @@ def scan_single_url(raw_url: str) -> dict:
                             element.scroll_into_view_if_needed()
                             element.click()
                             current_trigger = "Manual Click"
-                            page.wait_for_timeout(CONFIG["click_config"]["wait_after_click"])
-                            if new_page_obj and CONFIG["click_config"]["capture_new_window"]:
-                                # Wait for new page load
-                                new_page_obj.wait_for_load_state("networkidle", timeout=CONFIG["timeout"])
-                                final_new_url = new_page_obj.url
-                                if is_valid_url(final_new_url):
-                                    navigation_events.append({
-                                        "jump_id": jump_id,
-                                        "jump_url": final_new_url,
-                                        "from_url": page.url,
-                                        "jump_type": "New Window",
-                                        "status_code": 200,
-                                        "trigger_type": current_trigger,
-                                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                                    })
-                                    jump_id += 1
+                            # Use wait_for_event for reliable new window capture (fix race condition)
+                            if CONFIG["click_config"]["capture_new_window"]:
+                                try:
+                                    new_page = context.wait_for_event(
+                                        'page', timeout=CONFIG["click_config"]["wait_after_click"])
+                                    new_page_obj = new_page
+                                    logger.info(f"New window opened: {new_page_obj.url}")
+                                    new_page_obj.wait_for_load_state("networkidle", timeout=CONFIG["timeout"])
+                                    final_new_url = new_page_obj.url
+                                    if is_valid_url(final_new_url):
+                                        navigation_events.append({
+                                            "jump_id": jump_id,
+                                            "jump_url": final_new_url,
+                                            "from_url": page.url,
+                                            "jump_type": "New Window",
+                                            "status_code": 200,
+                                            "trigger_type": current_trigger,
+                                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                                        })
+                                        jump_id += 1
+                                except Exception:
+                                    # No new window opened, that's fine
+                                    pass
+                            else:
+                                page.wait_for_timeout(CONFIG["click_config"]["wait_after_click"])
                             break
                         except Exception as e:
                             logger.warning(f"Click retry failed: {e}")
@@ -455,7 +477,7 @@ def scan_single_url(raw_url: str) -> dict:
             if new_page_obj and CONFIG["click_config"]["capture_new_window"]:
                 try:
                     final_url = new_page_obj.url
-                except:
+                except Exception:
                     final_url = page.url
             else:
                 final_url = page.url
@@ -515,28 +537,33 @@ def scan_single_url(raw_url: str) -> dict:
             error_msg = str(e)
             result["error_msg"] = error_msg
             result["error_code"], _ = extract_error_code(error_msg)
-            logger.warning(f"Scan failed {std_url}: {error_msg}, retry {retry+1}")
+            # Fatal initialization error (e.g. browser not installed), don't retry
+            if not initialization_ready:
+                logger.error(f"Fatal initialization error for {std_url}: {error_msg}")
+                retry = CONFIG["max_retry_times"] + 1  # Force exit retry loop
+            else:
+                logger.warning(f"Scan failed {std_url}: {error_msg}, retry {retry+1}")
         finally:
             # Clean up resources
             if page:
                 try:
                     page.close()
-                except:
+                except Exception:
                     pass
             if context:
                 try:
                     context.close()
-                except:
+                except Exception:
                     pass
             if browser:
                 try:
                     browser.close()
-                except:
+                except Exception:
                     pass
             if playwright:
                 try:
                     playwright.stop()
-                except:
+                except Exception:
                     pass
             retry += 1
 
@@ -596,7 +623,7 @@ def export_to_excel(scan_results: list):
             for cell in col:
                 try:
                     max_len = max(max_len, len(str(cell.value)))
-                except:
+                except Exception:
                     pass
             sheet.column_dimensions[col_letter].width = min(max_len + 2, 50)
         # Header styling
@@ -744,7 +771,13 @@ def main():
     # Load URLs from Excel
     try:
         wb = load_workbook(CONFIG["input_excel_path"], read_only=True)
-        ws = wb[CONFIG["input_sheet_name"]]
+        sheet_name = CONFIG["input_sheet_name"]
+        if sheet_name not in wb.sheetnames:
+            logger.error(f"Sheet '{sheet_name}' not found in '{CONFIG['input_excel_path']}'. "
+                         f"Available sheets: {wb.sheetnames}")
+            wb.close()
+            return
+        ws = wb[sheet_name]
         url_column = CONFIG["url_column"]
         col_idx = ord(url_column.upper()) - 64 if len(url_column) == 1 else None
         if not col_idx:
