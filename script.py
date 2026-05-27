@@ -46,7 +46,7 @@ CONFIG = {
     "proxy_config": None,            # Proxy dict: {"server": "http://ip:port"}
 
     # Multi-threading | 多线程
-    "max_workers": 10,               # Number of concurrent threads
+    "max_workers": 30,               # Number of concurrent threads
 
     # Click Simulation | 点击模拟
     "click_config": {
@@ -310,7 +310,7 @@ def scan_single_url(raw_url: str) -> dict:
     result = {
         "raw_url": raw_url,
         "standard_url": "",
-        "jump_chain": [],          # list of jump dicts with detailed info
+        "jump_chain": [],
         "http_status_list": [],
         "redirect_type_list": [],
         "trigger_mode_list": [],
@@ -338,166 +338,174 @@ def scan_single_url(raw_url: str) -> dict:
 
     retry = 0
     while retry <= CONFIG["max_retry_times"]:
+        playwright = None
+        browser = None
+        context = None
+        page = None
+        new_page_obj = None
         try:
-            with sync_playwright() as p:
-                browser_kwargs = {"headless": CONFIG["headless_mode"]}
-                if CONFIG["proxy_config"]:
-                    browser_kwargs["proxy"] = CONFIG["proxy_config"]
-                browser = p.chromium.launch(**browser_kwargs)
-                context = browser.new_context(ignore_https_errors=True)
-                page = context.new_page()
-                page.set_default_timeout(CONFIG["timeout"])
+            playwright = sync_playwright().start()
+            browser_kwargs = {"headless": CONFIG["headless_mode"]}
+            if CONFIG["proxy_config"]:
+                browser_kwargs["proxy"] = CONFIG["proxy_config"]
+            browser = playwright.chromium.launch(**browser_kwargs)
+            context = browser.new_context(ignore_https_errors=True)
+            page = context.new_page()
+            page.set_default_timeout(CONFIG["timeout"])
 
-                # Event storage
-                navigation_events = []  # each: {jump_url, from_url, status_code, trigger_type, jump_type}
-                jump_id = 1
-                current_trigger = "Auto Redirect"
-                new_page_obj = None
+            # Event storage
+            navigation_events = []
+            jump_id = 1
+            current_trigger = "Auto Redirect"
 
-                # Listeners
-                def on_frame_navigated(frame):
-                    nonlocal jump_id, current_trigger
-                    if frame == page.main_frame:
-                        url = frame.url
-                        if not navigation_events or navigation_events[-1]["jump_url"] != url:
+            # Listeners
+            def on_frame_navigated(frame):
+                nonlocal jump_id, current_trigger
+                if frame == page.main_frame:
+                    url = frame.url
+                    if not navigation_events or navigation_events[-1]["jump_url"] != url:
+                        navigation_events.append({
+                            "jump_id": jump_id,
+                            "jump_url": url,
+                            "from_url": page.url if jump_id > 1 else std_url,
+                            "jump_type": "Client Navigation",
+                            "status_code": 200,
+                            "trigger_type": current_trigger,
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                        })
+                        jump_id += 1
+
+            def on_response(response):
+                nonlocal jump_id, current_trigger
+                if 300 <= response.status < 400:
+                    location = response.headers.get("location", "")
+                    if location:
+                        redir_url = standardize_url(location)
+                        if redir_url:
                             navigation_events.append({
                                 "jump_id": jump_id,
-                                "jump_url": url,
-                                "from_url": page.url if jump_id > 1 else std_url,
-                                "jump_type": "Client Navigation",
-                                "status_code": 200,
+                                "jump_url": redir_url,
+                                "from_url": response.request.url,
+                                "jump_type": "3xx Redirect",
+                                "status_code": response.status,
                                 "trigger_type": current_trigger,
                                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                             })
                             jump_id += 1
 
-                def on_response(response):
-                    nonlocal jump_id, current_trigger
-                    if 300 <= response.status < 400:
-                        location = response.headers.get("location", "")
-                        if location:
-                            redir_url = standardize_url(location)
-                            if redir_url:
-                                navigation_events.append({
-                                    "jump_id": jump_id,
-                                    "jump_url": redir_url,
-                                    "from_url": response.request.url,
-                                    "jump_type": "3xx Redirect",
-                                    "status_code": response.status,
-                                    "trigger_type": current_trigger,
-                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                                })
-                                jump_id += 1
+            def on_page_opened(new_page):
+                nonlocal new_page_obj
+                new_page_obj = new_page
+                logger.info(f"New window opened: {new_page.url}")
 
-                def on_page_opened(new_page):
-                    nonlocal new_page_obj
-                    new_page_obj = new_page
-                    logger.info("New window opened after click")
+            page.on("framenavigated", on_frame_navigated)
+            page.on("response", on_response)
+            if CONFIG["click_config"]["capture_new_window"]:
+                context.on("page", on_page_opened)
 
-                page.on("framenavigated", on_frame_navigated)
-                page.on("response", on_response)
-                if CONFIG["click_config"]["capture_new_window"]:
-                    context.on("page", on_page_opened)
+            # Step 1: Go to URL
+            response = page.goto(std_url, wait_until="networkidle", timeout=CONFIG["timeout"])
+            page.wait_for_timeout(CONFIG["wait_for_network_idle"])
+            handle_cookie_consent(page)
 
-                # Step 1: Go to URL
-                response = page.goto(std_url, wait_until="networkidle", timeout=CONFIG["timeout"])
-                page.wait_for_timeout(CONFIG["wait_for_network_idle"])
-                handle_cookie_consent(page)
+            # Check authentication required
+            try:
+                page_html = page.content()
+            except Exception as e:
+                logger.warning(f"Failed to get page content for auth check: {e}")
+                page_html = ""
+            auth_indicators = ["authentication required", "certificate required", "nom d'utilisateur",
+                               "mot de passe", "authentification requise", "certificatif requis"]
+            if any(ind in page_html.lower() for ind in auth_indicators):
+                result["auth_required"] = True
+                logger.info(f"Auth/certificate required: {std_url}")
 
-                # Check if authentication required (cert/login)
-                page_html = page.content().lower()
-                auth_indicators = ["authentication required", "certificate required", "nom d'utilisateur",
-                                   "mot de passe", "authentification requise", "certificatif requis"]
-                if any(ind in page_html for ind in auth_indicators):
-                    result["auth_required"] = True
-                    logger.info(f"Auth/certificate required: {std_url}")
+            # Step 2: Click simulation
+            if CONFIG["click_config"]["enable_click_function"]:
+                element, desc = find_clickable_element(page)
+                if element:
+                    result["click_triggered"] = True
+                    result["click_element_info"] = desc
+                    for _ in range(CONFIG["click_config"]["max_click_retry"]):
+                        try:
+                            element.scroll_into_view_if_needed()
+                            element.click()
+                            current_trigger = "Manual Click"
+                            page.wait_for_timeout(CONFIG["click_config"]["wait_after_click"])
+                            if new_page_obj and CONFIG["click_config"]["capture_new_window"]:
+                                # Wait for new page load
+                                new_page_obj.wait_for_load_state("networkidle", timeout=CONFIG["timeout"])
+                                final_new_url = new_page_obj.url
+                                if is_valid_url(final_new_url):
+                                    navigation_events.append({
+                                        "jump_id": jump_id,
+                                        "jump_url": final_new_url,
+                                        "from_url": page.url,
+                                        "jump_type": "New Window",
+                                        "status_code": 200,
+                                        "trigger_type": current_trigger,
+                                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                                    })
+                                    jump_id += 1
+                            break
+                        except Exception as e:
+                            logger.warning(f"Click retry failed: {e}")
 
-                # Step 2: Click simulation
-                if CONFIG["click_config"]["enable_click_function"]:
-                    element, desc = find_clickable_element(page)
-                    if element:
-                        result["click_triggered"] = True
-                        result["click_element_info"] = desc
-                        for _ in range(CONFIG["click_config"]["max_click_retry"]):
-                            try:
-                                element.scroll_into_view_if_needed()
-                                element.click()
-                                current_trigger = "Manual Click"
-                                page.wait_for_timeout(CONFIG["click_config"]["wait_after_click"])
-                                if new_page_obj and CONFIG["click_config"]["capture_new_window"]:
-                                    # Wait for new page load
-                                    new_page_obj.wait_for_load_state("networkidle", timeout=CONFIG["timeout"])
-                                    # Add new page final URL to chain
-                                    final_new_url = new_page_obj.url
-                                    if is_valid_url(final_new_url):
-                                        navigation_events.append({
-                                            "jump_id": jump_id,
-                                            "jump_url": final_new_url,
-                                            "from_url": page.url,
-                                            "jump_type": "New Window",
-                                            "status_code": 200,
-                                            "trigger_type": current_trigger,
-                                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                                        })
-                                        jump_id += 1
-                                break
-                            except Exception as e:
-                                logger.warning(f"Click retry failed: {e}")
+            # Step 3: Determine final URL
+            if new_page_obj and CONFIG["click_config"]["capture_new_window"]:
+                try:
+                    final_url = new_page_obj.url
+                except:
+                    final_url = page.url
+            else:
+                final_url = page.url
+            result["final_url"] = final_url
 
-                # Step 3: Collect final URL and build jump chain
-                final_url = new_page_obj.url if (new_page_obj and CONFIG["click_config"]["capture_new_window"]) else page.url
-                result["final_url"] = final_url
+            # Add final landing if not already in chain
+            if not navigation_events or navigation_events[-1]["jump_url"] != final_url:
+                navigation_events.append({
+                    "jump_id": jump_id,
+                    "jump_url": final_url,
+                    "from_url": navigation_events[-1]["jump_url"] if navigation_events else "",
+                    "jump_type": "Final Landing",
+                    "status_code": 200,
+                    "trigger_type": current_trigger,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                })
 
-                # Add final landing if not already in chain
-                if not navigation_events or navigation_events[-1]["jump_url"] != final_url:
-                    navigation_events.append({
-                        "jump_id": jump_id,
-                        "jump_url": final_url,
-                        "from_url": navigation_events[-1]["jump_url"] if navigation_events else "",
-                        "jump_type": "Final Landing",
-                        "status_code": 200,
-                        "trigger_type": current_trigger,
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                    })
+            # Deduplicate and limit jumps
+            seen = set()
+            valid_jumps = []
+            for ev in sorted(navigation_events, key=lambda x: x["jump_id"]):
+                url = ev["jump_url"]
+                if url and is_valid_url(url) and url not in seen and len(valid_jumps) < CONFIG["max_jump_count"]:
+                    # No need to fetch intermediate HTML, keep as is
+                    ev["page_html"] = ""  # Not used for classification
+                    valid_jumps.append(ev)
+                    seen.add(url)
 
-                # Process and deduplicate
-                seen = set()
-                valid_jumps = []
-                for ev in sorted(navigation_events, key=lambda x: x["jump_id"]):
-                    url = ev["jump_url"]
-                    if url and is_valid_url(url) and url not in seen and len(valid_jumps) < CONFIG["max_jump_count"]:
-                        # Get page HTML for classification (only for non-redirects)
-                        html_snippet = ""
-                        if ev["jump_type"] != "3xx Redirect":
-                            try:
-                                # Use a temporary page to fetch content (avoid affecting current state)
-                                temp_page = context.new_page()
-                                temp_page.goto(url, timeout=10000, wait_until="domcontentloaded")
-                                html_snippet = temp_page.content()[:10000]
-                                temp_page.close()
-                            except:
-                                pass
-                        ev["page_html"] = html_snippet
-                        valid_jumps.append(ev)
-                        seen.add(url)
+            result["jump_chain"] = valid_jumps
 
-                # Classify the final URL (most important)
-                final_jump_info = {
-                    "jump_url": result["final_url"],
-                    "page_html": page.content()[:10000] if not new_page_obj else (new_page_obj.content()[:10000] if new_page_obj else ""),
-                    "request_type": response.request.resource_type if response else ""
-                }
-                result["main_class"], result["sub_class"] = classify_url(final_jump_info)
+            # Final classification using final page content (safely)
+            final_html = ""
+            try:
+                if new_page_obj and CONFIG["click_config"]["capture_new_window"] and new_page_obj:
+                    final_html = new_page_obj.content()[:10000]
+                else:
+                    final_html = page.content()[:10000]
+            except Exception as e:
+                logger.warning(f"Failed to get final page content: {e}")
+                final_html = ""
 
-                # Fill in detailed lists for Excel
-                result["jump_chain"] = valid_jumps
-                result["processing_status"] = "Success"
-                logger.info(f"Scan success: {std_url} -> {final_url}")
-                break  # success
-
-                # Cleanup
-                context.close()
-                browser.close()
+            final_jump_info = {
+                "jump_url": result["final_url"],
+                "page_html": final_html,
+                "request_type": response.request.resource_type if response else ""
+            }
+            result["main_class"], result["sub_class"] = classify_url(final_jump_info)
+            result["processing_status"] = "Success"
+            logger.info(f"Scan success: {std_url} -> {final_url}")
+            break  # success
 
         except PlaywrightTimeoutError:
             result["error_msg"] = f"Timeout ({CONFIG['timeout']/1000}s)"
@@ -509,6 +517,27 @@ def scan_single_url(raw_url: str) -> dict:
             result["error_code"], _ = extract_error_code(error_msg)
             logger.warning(f"Scan failed {std_url}: {error_msg}, retry {retry+1}")
         finally:
+            # Clean up resources
+            if page:
+                try:
+                    page.close()
+                except:
+                    pass
+            if context:
+                try:
+                    context.close()
+                except:
+                    pass
+            if browser:
+                try:
+                    browser.close()
+                except:
+                    pass
+            if playwright:
+                try:
+                    playwright.stop()
+                except:
+                    pass
             retry += 1
 
     if result["error_msg"] and not result["main_class"]:
