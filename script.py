@@ -608,7 +608,7 @@ def export_to_excel(scan_results: list):
     logger.info(f"Excel saved: {CONFIG['output_excel_path']}")
 
 def generate_statistics(scan_results: list):
-    """Print stats and generate chart"""
+    """Print stats and generate chart with BNPP brand colors and count labels"""
     total = len(scan_results)
     success = sum(1 for r in scan_results if r["processing_status"] == "Success")
     auth_req = sum(1 for r in scan_results if r["auth_required"])
@@ -636,23 +636,82 @@ def generate_statistics(scan_results: list):
         for code, cnt in error_codes.items():
             logger.info(f"  {code}: {cnt}")
 
+    # BNPP Official Brand Colors | BNP Paribas 官方品牌色
+    # Primary green (brand identity) | 品牌主色
+    BNPP_GREEN_PRIMARY = "#01966D"      # Green Haze - official brand primary color [5†L5-L7]
+    BNPP_GREEN_SECONDARY = "#00915A"    # Green Haze (CIB version) [6†L5-L8]
+    BNPP_GREEN_TERTIARY = "#00C188"     # Caribbean Green [7†L4-L7]
+    BNPP_GREEN_DARK = "#016C47"         # Fun Green [7†L5-L6]
+    BNPP_GRAY_LIGHT = "#B7B7B7"         # Nobel - secondary brand color [5†L6]
+    BNPP_BLACK = "#000000"              # Brand black [5†L7]
+    BNPP_WHITE = "#FFFFFF"              # Brand white [7†L7]
+
+    BNPP_PALETTE = [
+        BNPP_GREEN_PRIMARY, BNPP_GREEN_SECONDARY, BNPP_GREEN_TERTIARY,
+        BNPP_GREEN_DARK, BNPP_GRAY_LIGHT, BNPP_BLACK
+    ]
+
     # Chart
     if main_classes:
         plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+        # Determine subplot layout
+        if error_codes:
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        else:
+            fig, ax1 = plt.subplots(1, 1, figsize=(8, 8))
+            ax2 = None
+
+        # ==================== Main Category Pie Chart (with count labels) ====================
         labels = list(main_classes.keys())
         sizes = list(main_classes.values())
-        ax1.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
-        ax1.set_title("Main Category Distribution")
-        if error_codes:
+
+        # Custom autopct function to show both count and percentage
+        def make_autopct(sizes):
+            def autopct(pct):
+                total = sum(sizes)
+                val = int(round(pct * total / 100.0))
+                return f'{val}\n({pct:.1f}%)'
+            return autopct
+
+        # Use BNPP brand colors, cycle if more categories than palette
+        colors = BNPP_PALETTE * (len(labels) // len(BNPP_PALETTE) + 1)
+        wedges, texts, autotexts = ax1.pie(
+            sizes,
+            labels=labels,
+            autopct=make_autopct(sizes),
+            colors=colors[:len(labels)],
+            startangle=90,
+            textprops={'fontsize': 11}
+        )
+        # Style improvement: set autopct text to white for better readability
+        for autotext in autotexts:
+            autotext.set_color('white')
+            autotext.set_fontweight('bold')
+            autotext.set_fontsize(10)
+        ax1.set_title("Main Category Distribution (with counts & percentages)", fontsize=12, fontweight='bold')
+
+        # ==================== Error Code Bar Chart (with count labels on top) ====================
+        if error_codes and ax2 is not None:
             codes = list(error_codes.keys())
             counts = list(error_codes.values())
-            ax2.bar(codes, counts)
-            ax2.set_title("Error Code Distribution")
-            ax2.tick_params(axis="x", rotation=45)
+
+            # Use BNPP green gradient for bars
+            bar_colors = BNPP_PALETTE * (len(codes) // len(BNPP_PALETTE) + 1)
+            bars = ax2.bar(codes, counts, color=bar_colors[:len(codes)], edgecolor=BNPP_BLACK, linewidth=0.5)
+            # Add count labels on top of bars
+            ax2.bar_label(bars, fmt='%d', padding=3, fontsize=9)
+            ax2.set_title("Error Code Distribution (with counts)", fontsize=12, fontweight='bold')
+            ax2.set_xlabel("Error Code", fontsize=10)
+            ax2.set_ylabel("Count", fontsize=10)
+            ax2.tick_params(axis="x", rotation=90, labelsize=8)
+            # Adjust y-axis to prevent labels from being cut off
+            ax2.set_ylim(0, max(counts) * 1.1)
+
         plt.tight_layout()
         chart_path = f"url_scan_chart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         plt.savefig(chart_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
         logger.info(f"Chart saved: {chart_path}")
 
 def get_processed_urls(output_path: str) -> set:
