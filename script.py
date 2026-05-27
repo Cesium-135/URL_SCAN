@@ -1,47 +1,59 @@
-'''
-Before running, you need to run the following commands
-运行前需执行以下命令：
-pip install playwright openpyxl matplotlib
-playwright install chromium
-'''
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+URL Jump Chain Capture & Classification Tool (Multithreaded + Click Simulation + Breakpoint Resume)
+URL跳转链路捕获与分类工具（多线程 + 点击模拟 + 断点续传）
 
-# -------------------------- 1. Import Required Dependencies | 导入所需依赖库 --------------------------
+Before running, install dependencies:
+    pip install playwright openpyxl matplotlib
+    playwright install chromium
+
+Usage:
+    python script.py -i input.xlsx -o output.xlsx
+"""
+
+# -------------------------- 1. Imports | 导入库 --------------------------
+import os
+import re
+import argparse
+import logging
+import traceback
+from datetime import datetime
+from urllib.parse import urlparse, urlunparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, Alignment
-import os
-import re
-from urllib.parse import urlparse, urlunparse
-from datetime import datetime
-import argparse
-import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import matplotlib.pyplot as plt
-import traceback
 
-# -------------------------- 2. Global Configuration | 全局配置项 --------------------------
+# -------------------------- 2. Global Configuration | 全局配置 --------------------------
 CONFIG = {
-    # File Path Configuration | 文件路径配置（默认值，可通过命令行/交互覆盖）
-    "input_excel_path": "",  # Input Excel with URL list | 输入URL的Excel文件路径
-    "output_excel_path": "",  # Output Excel with results | 输出结果的Excel文件路径
-    "input_sheet_name": "Feuil1",  # Input sheet name | 输入Sheet名称
-    "summary_sheet_name": "output_url",  # Summary result sheet | 输出汇总Sheet名称
-    "detail_sheet_name": "jump_chain",  # Jump detail sheet | 输出详情Sheet名称
+    # File & Sheet Names | 文件与工作表名称
+    "input_excel_path": "",          # Will be set by CLI or interactive
+    "output_excel_path": "",         # Will be set by CLI or interactive
+    "input_sheet_name": "Feuil1",    # Sheet name containing URLs
+    "summary_sheet_name": "summary", # Summary sheet name
+    "detail_sheet_name": "jump_chain", # Detail sheet name
+    "url_column": "A",               # Excel column containing URLs (e.g., "A", "B") | URL所在列
 
-    # Browser Runtime Configuration | 浏览器运行配置
-    "headless_mode": True,  # 云服务器部署默认无头模式 | Headless mode (default True for cloud deployment)
-    "timeout": 30 * 1000,  # Single page access timeout (ms) | 单页面访问超时时间（毫秒）
-    "max_retry_times": 2,  # Max retry times for single URL | 单条URL失败重试次数
-    "max_jump_count": 20,  # Max jump count, prevent infinite redirect loop | 最大跳转次数
-    "wait_for_network_idle": 2000,  # Wait for network idle after page load (ms) | 页面加载后等待网络空闲时间
-    "proxy_config": None,  # Proxy config: None=no proxy, format: {"server": "http://ip:port"} | 代理配置
+    # Browser & Network | 浏览器与网络
+    "headless_mode": True,           # Headless mode for cloud/server
+    "timeout": 30000,                # Page timeout (ms)
+    "max_retry_times": 2,            # Retry count per URL
+    "max_jump_count": 20,            # Max redirect steps per URL
+    "wait_for_network_idle": 2000,   # ms to wait after page load
+    "proxy_config": None,            # Proxy dict: {"server": "http://ip:port"}
 
-    # Click Trigger Configuration | 点击触发配置
+    # Multi-threading | 多线程
+    "max_workers": 10,               # Number of concurrent threads
+
+    # Click Simulation | 点击模拟
     "click_config": {
-        "enable_click_function": True,  # Enable click simulation | 是否开启点击模拟功能
-        "max_click_retry": 2,  # Max retry times for click | 点击最大重试次数
-        "wait_after_click": 5 * 1000,  # Wait time after click (ms) | 点击后等待时间
-        "capture_new_window": True,  # Capture jump in new window after click | 捕获新窗口跳转
+        "enable_click_function": True,
+        "max_click_retry": 2,
+        "wait_after_click": 5000,
+        "capture_new_window": True,
         "target_keywords": {
             "auth_login": ["login", "signin", "sign-in", "secure access", "account",
                            "connexion", "se connecter", "accès sécurisé", "compte"],
@@ -55,24 +67,23 @@ CONFIG = {
         ]
     },
 
-    # Cookie Consent Configuration | Cookie同意弹窗配置
+    # Cookie Consent Handling | Cookie 同意弹窗处理
     "cookie_config": {
         "enable_cookie_handle": True,
-        "keywords": ["accept cookie", "accept all cookies", "accepter les cookies", "tout accepter", "ok", "agree"],
+        "keywords": ["accept cookie", "accept all cookies", "accepter les cookies",
+                     "tout accepter", "ok", "agree", "allow all"],
         "selectors": [
             "button:has-text('{kw}'), a:has-text('{kw}')",
             "[role='button']:has-text('{kw}'), div[class*='cookie'] button"
         ]
     },
 
-    # URL Classification Rules (EN/FR) | URL分类规则（英法双语）
+    # URL Classification Rules (EN/FR only) | 分类规则
     "classify_rules": {
-        # Main Category | 主分类
         "Authentication": {
             "keywords": ["login", "auth", "iam", "sso", "token", "signin", "authentification"],
             "page_features": ["username", "password", "login", "sign in",
                               "nom d'utilisateur", "mot de passe", "connexion"],
-            # Sub Category | 细分分类
             "sub_class": {
                 "SSO/Auth Service": ["sso", "iam", "oauth", "openid", "authentification unique"],
                 "Login Page": ["login", "signin", "connexion", "se connecter"],
@@ -106,7 +117,6 @@ CONFIG = {
                 "Help/Support": ["help", "aide", "support", "assistance", "faq"]
             }
         },
-        # Error Category | 错误分类
         "Error": {
             "sub_class": {
                 "Connection Error": ["ERR_CONNECTION", "connection refused", "connexion refusée"],
@@ -118,576 +128,584 @@ CONFIG = {
         }
     },
 
-    # Log Configuration | 日志配置
+    # Logging | 日志
     "log_config": {
         "log_file": "url_scan_{}.log".format(datetime.now().strftime("%Y%m%d_%H%M%S")),
         "log_level": "INFO"
     }
 }
 
-# -------------------------- 3. Initialization | 初始化配置 --------------------------
-# Setup Logging | 配置日志
-def setup_logging():
-    """
-    Initialize logging configuration (support cloud server deployment)
-    初始化日志配置（适配云服务器部署）
-    """
-    logging.basicConfig(
-        level=getattr(logging, CONFIG["log_config"]["log_level"]),
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler(CONFIG["log_config"]["log_file"], encoding="utf-8"),
-            logging.StreamHandler()  # Output to console | 同时输出到控制台
-        ]
-    )
-    return logging.getLogger(__name__)
+# -------------------------- 3. Logging Setup | 日志配置 --------------------------
+logging.basicConfig(
+    level=getattr(logging, CONFIG["log_config"]["log_level"]),
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler(CONFIG["log_config"]["log_file"], encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
-logger = setup_logging()
-
-# Parse Command Line Args | 解析命令行参数
+# -------------------------- 4. Utility Functions | 工具函数 --------------------------
 def parse_command_line_args():
-    """
-    Parse command line arguments for input/output paths
-    解析命令行参数（输入/输出路径）
-    """
-    parser = argparse.ArgumentParser(
-        description="URL Scan Tool | URL扫描工具",
-        epilog="Example: python script.py -i URL_CORE.xlsx -o URL_CORE_result.xlsx"
-    )
-    parser.add_argument("-i", "--input", help="Input Excel file path | 输入Excel文件路径", type=str)
-    parser.add_argument("-o", "--output", help="Output Excel file path | 输出Excel文件路径", type=str)
+    """Parse CLI arguments or prompt interactively"""
+    parser = argparse.ArgumentParser(description="URL Scan Tool | URL扫描工具")
+    parser.add_argument("-i", "--input", help="Input Excel file path | 输入Excel文件路径")
+    parser.add_argument("-o", "--output", help="Output Excel file path | 输出Excel文件路径")
     args = parser.parse_args()
 
-    # Interactive input if no args | 无参数时交互式输入
     if not args.input:
-        args.input = input("Please enter input Excel file path | 请输入输入Excel文件路径: ").strip()
+        args.input = input("Please enter input Excel file path: ").strip()
         while not args.input:
-            args.input = input("Input path cannot be empty | 输入路径不能为空，请重新输入: ").strip()
+            args.input = input("Input path cannot be empty, please re-enter: ").strip()
 
     if not args.output:
         default_output = f"URL_SCAN_RESULT_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        args.output = input(f"Please enter output Excel file path (default: {default_output}) | 请输入输出Excel文件路径（默认：{default_output}）: ").strip() or default_output
+        args.output = input(f"Please enter output Excel path (default: {default_output}): ").strip() or default_output
 
     CONFIG["input_excel_path"] = args.input
     CONFIG["output_excel_path"] = args.output
-    logger.info(f"Input path: {CONFIG['input_excel_path']} | 输入路径: {CONFIG['input_excel_path']}")
-    logger.info(f"Output path: {CONFIG['output_excel_path']} | 输出路径: {CONFIG['output_excel_path']}")
+    logger.info(f"Input: {CONFIG['input_excel_path']} | Output: {CONFIG['output_excel_path']}")
 
-# -------------------------- 4. Utility Functions | 工具函数模块 --------------------------
 def standardize_url(url: str) -> str:
-    """
-    Standardize URL format, complete protocol, clean invalid characters
-    功能：URL标准化处理，补全协议、清洗无效字符，确保URL可正常访问
-    :param url: Raw input URL | 原始输入的URL字符串
-    :return: Standardized valid URL, empty string if invalid | 标准化后的URL，无效URL返回空字符串
-    """
+    """Standardize URL, add https if missing"""
     url = url.strip()
     if not url:
         return ""
-
     parsed = urlparse(url)
     if not parsed.scheme:
         url = "https://" + url
         parsed = urlparse(url)
-
     if not parsed.netloc or parsed.scheme not in ["http", "https"]:
         return ""
-
     return urlunparse(parsed).rstrip("/")
 
 def is_valid_url(url: str) -> bool:
-    """
-    Validate if URL is legal and valid
-    功能：校验URL是否合法有效
-    :param url: URL to validate | 待校验的URL
-    :return: True=valid, False=invalid | 有效返回True，无效返回False
-    """
-    if not url:
-        return False
-    parsed = urlparse(url)
-    return all([parsed.scheme in ["http", "https"], parsed.netloc])
+    return bool(url and urlparse(url).scheme in ["http", "https"] and urlparse(url).netloc)
 
-def handle_cookie_consent(page):
-    """
-    Auto handle cookie consent popup (EN/FR bilingual)
-    自动处理Cookie同意弹窗（英法双语）
-    :param page: Playwright page object | Playwright页面对象
-    """
-    if not CONFIG["cookie_config"]["enable_cookie_handle"]:
-        return
-
-    cookie_config = CONFIG["cookie_config"]
-    for kw in cookie_config["keywords"]:
-        for selector_template in cookie_config["selectors"]:
-            selector = selector_template.format(kw=kw.lower())
-            try:
-                element = page.locator(selector).first
-                if element.is_visible(timeout=1000) and element.is_enabled(timeout=1000):
-                    element.click(timeout=2000)
-                    logger.info(f"Clicked cookie consent button | 点击Cookie同意按钮: {selector}")
-                    page.wait_for_timeout(1000)
-                    return
-            except Exception as e:
-                continue
-    logger.info("No cookie consent popup found | 未找到Cookie同意弹窗")
-
-def extract_error_code(error_msg: str) -> tuple[str, str]:
-    """
-    Extract error code and error type from error message
-    从错误信息中提取错误码和错误类型
-    :param error_msg: Original error message | 原始错误信息
-    :return: (error_code, error_type) | 错误码、错误类型
-    """
+def extract_error_code(error_msg: str) -> tuple:
+    """Extract error code and error type from error message"""
     if not error_msg:
-        return "", "Unknown Error | 未知错误"
-
-    # Match Playwright/Chrome error codes | 匹配Playwright/Chrome错误码
-    error_code_pattern = r"ERR_\w+"
-    error_code = re.search(error_code_pattern, error_msg)
+        return "", "Unknown Error"
+    # Match Playwright/Chrome error codes
+    error_code = re.search(r"ERR_\w+", error_msg)
     error_code = error_code.group() if error_code else ""
-
-    # Match HTTP status codes | 匹配HTTP状态码
     if not error_code:
-        http_code_pattern = r"\b(4\d{2}|5\d{2}|3\d{2})\b"
-        http_code = re.search(http_code_pattern, error_msg)
+        http_code = re.search(r"\b(4\d{2}|5\d{2}|3\d{2})\b", error_msg)
         error_code = http_code.group() if http_code else ""
-
-    # Classify error type | 分类错误类型
-    error_type = "Unknown Error | 未知错误"
-    error_rules = CONFIG["classify_rules"]["Error"]["sub_class"]
-    for type_name, keywords in error_rules.items():
+    # Classify
+    error_type = "Unknown Error"
+    for type_name, keywords in CONFIG["classify_rules"]["Error"]["sub_class"].items():
         if any(kw in error_msg for kw in keywords) or (error_code and any(kw in error_code for kw in keywords)):
             error_type = type_name
             break
-
     return error_code, error_type
 
-def classify_url(jump_info: dict) -> tuple[str, str]:
-    """
-    Classify URL (main + sub category) according to configured rules
-    功能：根据配置规则对URL进行主分类+细分分类
-    :param jump_info: Full info of single jump | 单条跳转的完整信息字典
-    :return: (main_class, sub_class) | 主分类、细分分类
-    """
-    # If error exists | 存在错误时优先分类为Error
+def classify_url(jump_info: dict) -> tuple:
+    """Return (main_class, sub_class) based on URL and page content"""
     if jump_info.get("error_msg"):
         _, error_type = extract_error_code(jump_info["error_msg"])
         return "Error", error_type
 
-    url_lower = jump_info["jump_url"].lower()
+    url_lower = jump_info.get("jump_url", "").lower()
     page_html = jump_info.get("page_html", "").lower()
     request_type = jump_info.get("request_type", "")
 
-    # 1. Authentication | 认证模块
+    # Authentication
     auth_rule = CONFIG["classify_rules"]["Authentication"]
-    if any(keyword in url_lower for keyword in auth_rule["keywords"]) or \
-            any(feature in page_html for feature in auth_rule["page_features"]):
-        # Get sub class | 匹配细分分类
-        sub_class = "Other Authentication | 其他认证"
-        for sub_name, sub_keywords in auth_rule["sub_class"].items():
-            if any(kw in url_lower for kw in sub_keywords):
-                sub_class = sub_name
+    if any(kw in url_lower for kw in auth_rule["keywords"]) or \
+       any(feature in page_html for feature in auth_rule["page_features"]):
+        sub = "Other Authentication"
+        for sub_name, sub_kws in auth_rule["sub_class"].items():
+            if any(kw in url_lower for kw in sub_kws):
+                sub = sub_name
                 break
-        return "Authentication", sub_class
+        return "Authentication", sub
 
-    # 2. Espace | 业务空间
+    # Espace
     espace_rule = CONFIG["classify_rules"]["Espace"]
-    if any(keyword in url_lower for keyword in espace_rule["keywords"]) or \
-            any(feature in page_html for feature in espace_rule["page_features"]):
-        sub_class = "Other Espace | 其他业务空间"
-        for sub_name, sub_keywords in espace_rule["sub_class"].items():
-            if any(kw in url_lower for kw in sub_keywords):
-                sub_class = sub_name
+    if any(kw in url_lower for kw in espace_rule["keywords"]) or \
+       any(feature in page_html for feature in espace_rule["page_features"]):
+        sub = "Other Espace"
+        for sub_name, sub_kws in espace_rule["sub_class"].items():
+            if any(kw in url_lower for kw in sub_kws):
+                sub = sub_name
                 break
-        return "Espace", sub_class
+        return "Espace", sub
 
-    # 3. Backend/API | 后端接口
+    # Backend/API
     api_rule = CONFIG["classify_rules"]["Backend/API"]
-    if any(keyword in url_lower for keyword in api_rule["keywords"]) or \
-            request_type in api_rule["request_type"]:
-        sub_class = "Other API | 其他接口"
-        for sub_name, sub_keywords in api_rule["sub_class"].items():
-            if any(kw in url_lower for kw in sub_keywords):
-                sub_class = sub_name
+    if any(kw in url_lower for kw in api_rule["keywords"]) or \
+       request_type in api_rule["request_type"]:
+        sub = "Other API"
+        for sub_name, sub_kws in api_rule["sub_class"].items():
+            if any(kw in url_lower for kw in sub_kws):
+                sub = sub_name
                 break
-        return "Backend/API", sub_class
+        return "Backend/API", sub
 
-    # 4. Public front | 公共前端
-    sub_class = "Other Public Page | 其他公共页面"
-    for sub_name, sub_keywords in CONFIG["classify_rules"]["Public front"]["sub_class"].items():
-        if any(kw in url_lower for kw in sub_keywords):
-            sub_class = sub_name
+    # Public front
+    sub = "Other Public Page"
+    for sub_name, sub_kws in CONFIG["classify_rules"]["Public front"]["sub_class"].items():
+        if any(kw in url_lower for kw in sub_kws):
+            sub = sub_name
             break
-    return "Public front", sub_class
+    return "Public front", sub
 
-def find_target_clickable_element(page) -> tuple[object, str]:
-    """
-    Find target clickable element according to EN/FR bilingual rules
-    功能：根据英法双语规则，定位目标可点击元素
-    :param page: Playwright page object | Playwright页面对象
-    :return: (matched_element, element_description) | 匹配到的元素、元素描述信息
-    """
-    click_config = CONFIG["click_config"]
-    all_keywords = click_config["target_keywords"]["auth_login"] + click_config["target_keywords"]["espace_access"]
+def handle_cookie_consent(page):
+    """Accept cookie popups if present"""
+    if not CONFIG["cookie_config"]["enable_cookie_handle"]:
+        return
+    cfg = CONFIG["cookie_config"]
+    for kw in cfg["keywords"]:
+        for selector_tpl in cfg["selectors"]:
+            selector = selector_tpl.format(kw=kw.lower())
+            try:
+                # Try main frame
+                element = page.locator(selector).first
+                if element.is_visible(timeout=1000) and element.is_enabled():
+                    element.click()
+                    logger.info(f"Clicked cookie consent: {selector}")
+                    page.wait_for_timeout(1000)
+                    return
+            except:
+                pass
+    # Try iframes
+    try:
+        for frame in page.frames:
+            for kw in cfg["keywords"]:
+                for selector_tpl in cfg["selectors"]:
+                    selector = selector_tpl.format(kw=kw.lower())
+                    try:
+                        element = frame.locator(selector).first
+                        if element.is_visible(timeout=1000) and element.is_enabled():
+                            element.click()
+                            logger.info(f"Clicked cookie in iframe: {selector}")
+                            page.wait_for_timeout(1000)
+                            return
+                    except:
+                        pass
+    except:
+        pass
+
+def find_clickable_element(page):
+    """Find element to click for Espace/Login"""
+    click_cfg = CONFIG["click_config"]
+    all_keywords = click_cfg["target_keywords"]["auth_login"] + click_cfg["target_keywords"]["espace_access"]
     all_keywords = list(set([kw.lower() for kw in all_keywords]))
-
-    for selector_template in click_config["selector_priority"]:
-        for keyword in all_keywords:
-            selector = selector_template.format(kw=keyword)
+    for selector_tpl in click_cfg["selector_priority"]:
+        for kw in all_keywords:
+            selector = selector_tpl.format(kw=kw)
             try:
                 element = page.locator(selector).first
-                if element.is_visible(timeout=1000) and element.is_enabled(timeout=1000):
-                    element_desc = f"Selector: {selector}, Keyword: {keyword}"
-                    return element, element_desc
+                if element.is_visible(timeout=1000) and element.is_enabled():
+                    return element, f"Selector: {selector}, Keyword: {kw}"
             except:
                 continue
-    return None, "No matched element | 未匹配到元素"
+    return None, "No matching element"
 
-# -------------------------- 5. Core Scan Function | 核心扫描函数 --------------------------
+# -------------------------- 5. Core Scanning Function (per URL) --------------------------
 def scan_single_url(raw_url: str) -> dict:
-    """
-    Scan single URL, capture jump chain, error info, classification
-    扫描单个URL，捕获跳转链路、错误信息、分类结果
-    :param raw_url: Raw URL string | 原始URL字符串
-    :return: Scan result dict | 扫描结果字典
-    """
+    """Scan a single URL, capture jump chain, classification, errors."""
     result = {
         "raw_url": raw_url,
         "standard_url": "",
-        "jump_chain": [],
+        "jump_chain": [],          # list of jump dicts with detailed info
+        "http_status_list": [],
+        "redirect_type_list": [],
+        "trigger_mode_list": [],
         "main_class": "",
         "sub_class": "",
         "error_msg": "",
         "error_code": "",
-        "auth_required": False,  # Whether auth/certificate is required | 是否要求账号密码/证书
-        "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "auth_required": False,
+        "click_triggered": False,
+        "click_element_info": "",
+        "final_url": "",
+        "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "processing_status": "Failed"
     }
 
-    # URL Standardization | URL标准化
-    standard_url = standardize_url(raw_url)
-    result["standard_url"] = standard_url
-    if not is_valid_url(standard_url):
-        result["error_msg"] = "Invalid URL format | 无效的URL格式"
+    std_url = standardize_url(raw_url)
+    result["standard_url"] = std_url
+    if not is_valid_url(std_url):
+        result["error_msg"] = "Invalid URL format"
         result["error_code"] = "INVALID_URL"
-        result["main_class"], result["sub_class"] = classify_url(result)
-        logger.error(f"Invalid URL | 无效URL: {raw_url}")
+        result["main_class"], result["sub_class"] = classify_url({"error_msg": result["error_msg"]})
+        result["processing_status"] = "Failed"
+        logger.error(f"Invalid URL: {raw_url}")
         return result
 
-    # Retry mechanism | 重试机制
-    retry_count = 0
-    while retry_count <= CONFIG["max_retry_times"]:
+    retry = 0
+    while retry <= CONFIG["max_retry_times"]:
         try:
             with sync_playwright() as p:
-                # Launch browser | 启动浏览器
-                browser_kwargs = {"headless": CONFIG["headless_mode"], "timeout": CONFIG["timeout"]}
+                browser_kwargs = {"headless": CONFIG["headless_mode"]}
                 if CONFIG["proxy_config"]:
                     browser_kwargs["proxy"] = CONFIG["proxy_config"]
-
                 browser = p.chromium.launch(**browser_kwargs)
-                context = browser.new_context(ignore_https_errors=True)  # Ignore certificate errors | 忽略证书错误
+                context = browser.new_context(ignore_https_errors=True)
                 page = context.new_page()
-
-                # Set timeout | 设置超时
                 page.set_default_timeout(CONFIG["timeout"])
 
-                try:
-                    # Navigate to URL | 访问URL
-                    response = page.goto(standard_url, wait_until="networkidle", timeout=CONFIG["timeout"])
+                # Event storage
+                navigation_events = []  # each: {jump_url, from_url, status_code, trigger_type, jump_type}
+                jump_id = 1
+                current_trigger = "Auto Redirect"
+                new_page_obj = None
 
-                    # Handle cookie consent | 处理Cookie弹窗
-                    handle_cookie_consent(page)
+                # Listeners
+                def on_frame_navigated(frame):
+                    nonlocal jump_id, current_trigger
+                    if frame == page.main_frame:
+                        url = frame.url
+                        if not navigation_events or navigation_events[-1]["jump_url"] != url:
+                            navigation_events.append({
+                                "jump_id": jump_id,
+                                "jump_url": url,
+                                "from_url": page.url if jump_id > 1 else std_url,
+                                "jump_type": "Client Navigation",
+                                "status_code": 200,
+                                "trigger_type": current_trigger,
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                            })
+                            jump_id += 1
 
-                    # Check auth required | 检查是否要求账号密码/证书
-                    auth_indicators = ["authentication required", "certificate required", "nom d'utilisateur", "mot de passe",
-                                       "authentification requise", "certificat requis"]
-                    page_html = page.content().lower()
-                    if any(indicator in page_html for indicator in auth_indicators):
-                        result["auth_required"] = True
-                        logger.info(f"Auth/certificate required | 要求账号密码/证书: {standard_url}")
+                def on_response(response):
+                    nonlocal jump_id, current_trigger
+                    if 300 <= response.status < 400:
+                        location = response.headers.get("location", "")
+                        if location:
+                            redir_url = standardize_url(location)
+                            if redir_url:
+                                navigation_events.append({
+                                    "jump_id": jump_id,
+                                    "jump_url": redir_url,
+                                    "from_url": response.request.url,
+                                    "jump_type": "3xx Redirect",
+                                    "status_code": response.status,
+                                    "trigger_type": current_trigger,
+                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                                })
+                                jump_id += 1
 
-                    # Capture jump chain | 捕获跳转链路
-                    jump_count = 0
-                    current_url = standard_url
-                    while jump_count < CONFIG["max_jump_count"]:
-                        result["jump_chain"].append(current_url)
-                        # Check redirect | 检查重定向
-                        if page.url == current_url and jump_count > 0:
-                            break
-                        current_url = page.url
-                        jump_count += 1
+                def on_page_opened(new_page):
+                    nonlocal new_page_obj
+                    new_page_obj = new_page
+                    logger.info("New window opened after click")
 
-                    # Click simulation (optional) | 点击模拟（可选）
-                    if CONFIG["click_config"]["enable_click_function"]:
-                        element, desc = find_target_clickable_element(page)
-                        if element:
-                            for _ in range(CONFIG["click_config"]["max_click_retry"]):
-                                try:
-                                    element.click()
-                                    page.wait_for_timeout(CONFIG["click_config"]["wait_after_click"])
-                                    # Capture new window | 捕获新窗口
-                                    if CONFIG["click_config"]["capture_new_window"] and context.pages:
-                                        for new_page in context.pages:
-                                            if new_page.url not in result["jump_chain"]:
-                                                result["jump_chain"].append(new_page.url)
-                                    logger.info(f"Clicked element | 点击元素: {desc} for URL: {standard_url}")
-                                    break
-                                except Exception as e:
-                                    logger.warning(f"Click failed | 点击失败: {e}, retry {_+1}")
-                                    continue
+                page.on("framenavigated", on_frame_navigated)
+                page.on("response", on_response)
+                if CONFIG["click_config"]["capture_new_window"]:
+                    context.on("page", on_page_opened)
 
-                    # Get final page info | 获取最终页面信息
-                    final_url = page.url
-                    result["jump_chain"].append(final_url)
-                    result["jump_chain"] = list(dict.fromkeys(result["jump_chain"]))  # Remove duplicates | 去重
+                # Step 1: Go to URL
+                response = page.goto(std_url, wait_until="networkidle", timeout=CONFIG["timeout"])
+                page.wait_for_timeout(CONFIG["wait_for_network_idle"])
+                handle_cookie_consent(page)
 
-                    # Classify URL | URL分类
-                    jump_info = {
+                # Check if authentication required (cert/login)
+                page_html = page.content().lower()
+                auth_indicators = ["authentication required", "certificate required", "nom d'utilisateur",
+                                   "mot de passe", "authentification requise", "certificatif requis"]
+                if any(ind in page_html for ind in auth_indicators):
+                    result["auth_required"] = True
+                    logger.info(f"Auth/certificate required: {std_url}")
+
+                # Step 2: Click simulation
+                if CONFIG["click_config"]["enable_click_function"]:
+                    element, desc = find_clickable_element(page)
+                    if element:
+                        result["click_triggered"] = True
+                        result["click_element_info"] = desc
+                        for _ in range(CONFIG["click_config"]["max_click_retry"]):
+                            try:
+                                element.scroll_into_view_if_needed()
+                                element.click()
+                                current_trigger = "Manual Click"
+                                page.wait_for_timeout(CONFIG["click_config"]["wait_after_click"])
+                                if new_page_obj and CONFIG["click_config"]["capture_new_window"]:
+                                    # Wait for new page load
+                                    new_page_obj.wait_for_load_state("networkidle", timeout=CONFIG["timeout"])
+                                    # Add new page final URL to chain
+                                    final_new_url = new_page_obj.url
+                                    if is_valid_url(final_new_url):
+                                        navigation_events.append({
+                                            "jump_id": jump_id,
+                                            "jump_url": final_new_url,
+                                            "from_url": page.url,
+                                            "jump_type": "New Window",
+                                            "status_code": 200,
+                                            "trigger_type": current_trigger,
+                                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                                        })
+                                        jump_id += 1
+                                break
+                            except Exception as e:
+                                logger.warning(f"Click retry failed: {e}")
+
+                # Step 3: Collect final URL and build jump chain
+                final_url = new_page_obj.url if (new_page_obj and CONFIG["click_config"]["capture_new_window"]) else page.url
+                result["final_url"] = final_url
+
+                # Add final landing if not already in chain
+                if not navigation_events or navigation_events[-1]["jump_url"] != final_url:
+                    navigation_events.append({
+                        "jump_id": jump_id,
                         "jump_url": final_url,
-                        "page_html": page_html,
-                        "request_type": response.request.resource_type if response else ""
-                    }
-                    main_class, sub_class = classify_url(jump_info)
-                    result["main_class"] = main_class
-                    result["sub_class"] = sub_class
+                        "from_url": navigation_events[-1]["jump_url"] if navigation_events else "",
+                        "jump_type": "Final Landing",
+                        "status_code": 200,
+                        "trigger_type": current_trigger,
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                    })
 
-                    logger.info(f"Scan success | 扫描成功: {standard_url} -> {final_url}")
-                    break
+                # Process and deduplicate
+                seen = set()
+                valid_jumps = []
+                for ev in sorted(navigation_events, key=lambda x: x["jump_id"]):
+                    url = ev["jump_url"]
+                    if url and is_valid_url(url) and url not in seen and len(valid_jumps) < CONFIG["max_jump_count"]:
+                        # Get page HTML for classification (only for non-redirects)
+                        html_snippet = ""
+                        if ev["jump_type"] != "3xx Redirect":
+                            try:
+                                # Use a temporary page to fetch content (avoid affecting current state)
+                                temp_page = context.new_page()
+                                temp_page.goto(url, timeout=10000, wait_until="domcontentloaded")
+                                html_snippet = temp_page.content()[:10000]
+                                temp_page.close()
+                            except:
+                                pass
+                        ev["page_html"] = html_snippet
+                        valid_jumps.append(ev)
+                        seen.add(url)
 
-                except PlaywrightTimeoutError:
-                    result["error_msg"] = f"Timeout ({CONFIG['timeout']/1000}s) | 超时（{CONFIG['timeout']/1000}秒）"
-                    result["error_code"] = "ERR_TIMED_OUT"
-                    logger.warning(f"Timeout | 超时: {standard_url}, retry {retry_count+1}")
-                except Exception as e:
-                    error_msg = str(e)
-                    result["error_msg"] = error_msg
-                    result["error_code"], _ = extract_error_code(error_msg)
-                    logger.warning(f"Scan failed | 扫描失败: {standard_url}, error: {error_msg}, retry {retry_count+1}")
-                finally:
-                    # Ensure browser close | 确保浏览器关闭
-                    context.close()
-                    browser.close()
+                # Classify the final URL (most important)
+                final_jump_info = {
+                    "jump_url": result["final_url"],
+                    "page_html": page.content()[:10000] if not new_page_obj else (new_page_obj.content()[:10000] if new_page_obj else ""),
+                    "request_type": response.request.resource_type if response else ""
+                }
+                result["main_class"], result["sub_class"] = classify_url(final_jump_info)
 
-            retry_count += 1
+                # Fill in detailed lists for Excel
+                result["jump_chain"] = valid_jumps
+                result["processing_status"] = "Success"
+                logger.info(f"Scan success: {std_url} -> {final_url}")
+                break  # success
+
+                # Cleanup
+                context.close()
+                browser.close()
+
+        except PlaywrightTimeoutError:
+            result["error_msg"] = f"Timeout ({CONFIG['timeout']/1000}s)"
+            result["error_code"] = "ERR_TIMED_OUT"
+            logger.warning(f"Timeout {std_url}, retry {retry+1}")
         except Exception as e:
-            result["error_msg"] = f"Browser launch failed | 浏览器启动失败: {str(e)}"
-            logger.error(f"Browser error | 浏览器错误: {standard_url}, error: {str(e)}")
-            break
+            error_msg = str(e)
+            result["error_msg"] = error_msg
+            result["error_code"], _ = extract_error_code(error_msg)
+            logger.warning(f"Scan failed {std_url}: {error_msg}, retry {retry+1}")
+        finally:
+            retry += 1
 
-    # Final classification for error | 错误最终分类
     if result["error_msg"] and not result["main_class"]:
-        result["main_class"], result["sub_class"] = classify_url(result)
-
+        result["main_class"], result["sub_class"] = classify_url({"error_msg": result["error_msg"]})
     return result
 
-# -------------------------- 6. Excel Export & Statistics | Excel导出与统计 --------------------------
+# -------------------------- 6. Excel Export & Statistics --------------------------
 def export_to_excel(scan_results: list):
-    """
-    Export scan results to Excel (bilingual headers)
-    导出扫描结果到Excel（双语表头）
-    :param scan_results: List of scan results | 扫描结果列表
-    """
-    # Create workbook | 创建工作簿
+    """Write all scan results to Excel with two sheets (bilingual headers)"""
     wb = Workbook()
-
-    # Summary sheet | 汇总表
-    summary_sheet = wb.active
-    summary_sheet.title = CONFIG["summary_sheet_name"]
+    summary_ws = wb.active
+    summary_ws.title = CONFIG["summary_sheet_name"]
+    # Bilingual headers for summary
     summary_headers = [
-        "Raw URL | 原始URL", "Standard URL | 标准化URL", "Main Category | 主分类",
-        "Sub Category | 细分分类", "Error Message | 错误信息", "Error Code | 错误码",
-        "Auth Required | 是否要求认证", "Scan Time | 扫描时间"
+        "No./序号", "Original URL/原始URL", "Standard URL/标准化URL", "Final URL/最终URL",
+        "Jump Count/跳转次数", "Full Path/完整路径", "Main Category/主分类", "Sub Category/细分分类",
+        "Click Triggered/点击触发", "Click Element Info/点击元素", "Auth Required/需要认证",
+        "Status/状态", "Error Message/错误信息", "Error Code/错误码", "Scan Time/扫描时间"
     ]
-    summary_sheet.append(summary_headers)
+    summary_ws.append(summary_headers)
 
-    # Detail sheet (jump chain) | 详情表（跳转链路）
-    detail_sheet = wb.create_sheet(title=CONFIG["detail_sheet_name"])
-    detail_headers = ["Raw URL | 原始URL", "Jump Step | 跳转步骤", "Jump URL | 跳转URL"]
-    detail_sheet.append(detail_headers)
+    detail_ws = wb.create_sheet(CONFIG["detail_sheet_name"])
+    detail_headers = [
+        "Original URL/原始URL", "Step/步骤", "URL/跳转URL", "From URL/来源URL",
+        "Jump Type/跳转类型", "HTTP Status/状态码", "Trigger Mode/触发方式",
+        "Category/分类标签", "Timestamp/时间戳"
+    ]
+    detail_ws.append(detail_headers)
 
-    # Fill data | 填充数据
-    for idx, result in enumerate(scan_results, start=2):
-        # Summary sheet | 汇总表
-        summary_sheet.append([
-            result["raw_url"], result["standard_url"], result["main_class"],
-            result["sub_class"], result["error_msg"], result["error_code"],
-            "Yes | 是" if result["auth_required"] else "No | 否", result["scan_time"]
+    for idx, res in enumerate(scan_results, 1):
+        # Build summary row
+        jump_count = len(res["jump_chain"])
+        full_path = " → ".join([j["jump_url"] for j in res["jump_chain"]])
+        summary_ws.append([
+            idx, res["raw_url"], res["standard_url"], res["final_url"],
+            jump_count, full_path, res["main_class"], res["sub_class"],
+            "Yes" if res["click_triggered"] else "No", res["click_element_info"],
+            "Yes" if res["auth_required"] else "No", res["processing_status"],
+            res["error_msg"], res["error_code"], res["scan_time"]
         ])
 
-        # Detail sheet | 详情表
-        for step, jump_url in enumerate(result["jump_chain"], start=1):
-            detail_sheet.append([result["raw_url"], step, jump_url])
+        # Detail rows
+        for step, jump in enumerate(res["jump_chain"], 1):
+            detail_ws.append([
+                res["raw_url"], step, jump["jump_url"], jump.get("from_url", ""),
+                jump.get("jump_type", ""), jump.get("status_code", ""), jump.get("trigger_type", ""),
+                classify_url({"jump_url": jump["jump_url"], "page_html": jump.get("page_html", "")})[0],
+                jump.get("timestamp", "")
+            ])
 
-    # Style settings | 样式设置
-    for sheet in [summary_sheet, detail_sheet]:
+    # Auto-adjust column widths
+    for sheet in [summary_ws, detail_ws]:
         for col in sheet.columns:
-            max_length = 0
-            column = col[0].column_letter
+            max_len = 0
+            col_letter = col[0].column_letter
             for cell in col:
                 try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
+                    max_len = max(max_len, len(str(cell.value)))
                 except:
                     pass
-            adjusted_width = min(max_length + 2, 50)
-            sheet.column_dimensions[column].width = adjusted_width
-
-        # Header style | 表头样式
+            sheet.column_dimensions[col_letter].width = min(max_len + 2, 50)
+        # Header styling
         for cell in sheet[1]:
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal="center")
 
-    # Save Excel | 保存Excel
-    try:
-        wb.save(CONFIG["output_excel_path"])
-        logger.info(f"Excel exported successfully | Excel导出成功: {CONFIG['output_excel_path']}")
-    except Exception as e:
-        logger.error(f"Excel export failed | Excel导出失败: {e}")
+    wb.save(CONFIG["output_excel_path"])
+    logger.info(f"Excel saved: {CONFIG['output_excel_path']}")
 
 def generate_statistics(scan_results: list):
-    """
-    Generate scan statistics and charts (support cloud server deployment)
-    生成扫描统计数据和图表（适配云服务器部署）
-    :param scan_results: List of scan results | 扫描结果列表
-    """
-    # Statistics calculation | 统计计算
-    total_count = len(scan_results)
-    success_count = len([r for r in scan_results if not r["error_msg"]])
-    error_count = total_count - success_count
+    """Print stats and generate chart"""
+    total = len(scan_results)
+    success = sum(1 for r in scan_results if r["processing_status"] == "Success")
+    auth_req = sum(1 for r in scan_results if r["auth_required"])
 
-    # Main category statistics | 主分类统计
-    main_class_stats = {}
-    sub_class_stats = {}
-    error_code_stats = {}
-    auth_required_count = len([r for r in scan_results if r["auth_required"]])
+    main_classes = {}
+    error_codes = {}
+    for r in scan_results:
+        cls = r["main_class"]
+        main_classes[cls] = main_classes.get(cls, 0) + 1
+        if r["error_code"]:
+            error_codes[r["error_code"]] = error_codes.get(r["error_code"], 0) + 1
 
-    for result in scan_results:
-        # Main class | 主分类
-        main_class = result["main_class"]
-        main_class_stats[main_class] = main_class_stats.get(main_class, 0) + 1
+    logger.info("\n" + "="*60)
+    logger.info("SCAN STATISTICS | 扫描统计")
+    logger.info("="*60)
+    logger.info(f"Total URLs: {total}")
+    logger.info(f"Success: {success} ({success/total*100:.1f}%)")
+    logger.info(f"Failed: {total-success} ({(total-success)/total*100:.1f}%)")
+    logger.info(f"Auth Required: {auth_req} ({auth_req/total*100:.1f}%)")
+    logger.info("\nMain Category Distribution:")
+    for cls, cnt in main_classes.items():
+        logger.info(f"  {cls}: {cnt} ({cnt/total*100:.1f}%)")
+    if error_codes:
+        logger.info("\nError Code Distribution:")
+        for code, cnt in error_codes.items():
+            logger.info(f"  {code}: {cnt}")
 
-        # Sub class | 细分分类
-        sub_class = f"{main_class} - {result['sub_class']}"
-        sub_class_stats[sub_class] = sub_class_stats.get(sub_class, 0) + 1
+    # Chart
+    if main_classes:
+        plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        labels = list(main_classes.keys())
+        sizes = list(main_classes.values())
+        ax1.pie(sizes, labels=labels, autopct="%1.1f%%", startangle=90)
+        ax1.set_title("Main Category Distribution")
+        if error_codes:
+            codes = list(error_codes.keys())
+            counts = list(error_codes.values())
+            ax2.bar(codes, counts)
+            ax2.set_title("Error Code Distribution")
+            ax2.tick_params(axis="x", rotation=45)
+        plt.tight_layout()
+        chart_path = f"url_scan_chart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        plt.savefig(chart_path, dpi=300, bbox_inches="tight")
+        logger.info(f"Chart saved: {chart_path}")
 
-        # Error code | 错误码
-        if result["error_code"]:
-            error_code_stats[result["error_code"]] = error_code_stats.get(result["error_code"], 0) + 1
-
-    # Print statistics | 打印统计信息
-    logger.info("\n" + "="*50)
-    logger.info("Scan Statistics | 扫描统计报告")
-    logger.info("="*50)
-    logger.info(f"Total URLs Scanned | 总扫描URL数: {total_count}")
-    logger.info(f"Successfully Scanned | 扫描成功数: {success_count} ({success_count/total_count*100:.2f}%)")
-    logger.info(f"Failed Scanned | 扫描失败数: {error_count} ({error_count/total_count*100:.2f}%)")
-    logger.info(f"Auth Required URLs | 要求认证的URL数: {auth_required_count} ({auth_required_count/total_count*100:.2f}%)")
-    logger.info("\nMain Category Distribution | 主分类分布:")
-    for cls, count in main_class_stats.items():
-        logger.info(f"  {cls}: {count} ({count/total_count*100:.2f}%)")
-
-    logger.info("\nError Code Distribution | 错误码分布:")
-    for code, count in error_code_stats.items():
-        logger.info(f"  {code}: {count}")
-
-    # Generate charts | 生成图表（适配云服务器，保存为文件而非弹窗）
-    plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]  # Support EN/FR | 支持英法文
-    plt.rcParams["axes.unicode_minus"] = False
-
-    # 1. Main category pie chart | 主分类饼图
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
-
-    labels = list(main_class_stats.keys())
-    sizes = list(main_class_stats.values())
-    colors = plt.cm.Set3(range(len(labels)))
-    ax1.pie(sizes, labels=labels, autopct='%1.1f%%', colors=colors, startangle=90)
-    ax1.set_title("Main Category Distribution | 主分类分布", fontsize=14)
-
-    # 2. Error code bar chart | 错误码柱状图
-    if error_code_stats:
-        error_codes = list(error_code_stats.keys())
-        error_counts = list(error_code_stats.values())
-        ax2.bar(error_codes, error_counts, color=plt.cm.viridis(range(len(error_codes))))
-        ax2.set_title("Error Code Distribution | 错误码分布", fontsize=14)
-        ax2.set_xlabel("Error Code | 错误码")
-        ax2.set_ylabel("Count | 数量")
-        ax2.tick_params(axis='x', rotation=45)
-
-    # Save chart | 保存图表
-    chart_path = f"url_scan_chart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-    plt.tight_layout()
-    plt.savefig(chart_path, dpi=300, bbox_inches='tight')
-    logger.info(f"Statistics chart saved | 统计图表已保存: {chart_path}")
-
-# -------------------------- 6. Main Function | 主函数 --------------------------
-def main():
-    """
-    Main function: parse args -> load URLs -> multi-thread scan -> export -> statistics
-    主函数：解析参数 -> 加载URL -> 多线程扫描 -> 导出结果 -> 生成统计
-    """
+def get_processed_urls(output_path: str) -> set:
+    """Read already processed URLs from output Excel (breakpoint resume)"""
+    if not os.path.exists(output_path):
+        return set()
     try:
-        # Parse command line args | 解析命令行参数
-        parse_command_line_args()
-
-        # Load input Excel | 加载输入Excel
-        if not os.path.exists(CONFIG["input_excel_path"]):
-            logger.error(f"Input file not found | 输入文件不存在: {CONFIG['input_excel_path']}")
-            return
-
-        wb = load_workbook(CONFIG["input_excel_path"])
-        if CONFIG["input_sheet_name"] not in wb.sheetnames:
-            logger.error(f"Input sheet not found | 输入Sheet不存在: {CONFIG['input_sheet_name']}")
-            return
-
-        sheet = wb[CONFIG["input_sheet_name"]]
-        # Assume first column is URL list | 假设第一列为URL列表
-        url_list = [cell.value for cell in sheet['A'] if cell.value is not None and cell.value != "URL"]
+        wb = load_workbook(output_path, read_only=True)
+        ws = wb[CONFIG["summary_sheet_name"]]
+        processed = set()
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            # column 2 is "Original URL"
+            raw_url = row[1]
+            status = row[11]  # Status column
+            if raw_url and status == "Success":
+                processed.add(raw_url)
         wb.close()
-
-        if not url_list:
-            logger.error("No URLs found in input file | 输入文件中未找到URL")
-            return
-
-        logger.info(f"Loaded {len(url_list)} URLs | 加载了{len(url_list)}个URL")
-
-        # Multi-thread scan | 多线程扫描
-        scan_results = []
-        # Set thread count (adjust according to server resources) | 设置线程数（根据服务器资源调整）
-        thread_count = min(10, len(url_list))  # Max 10 threads | 最大10线程
-        logger.info(f"Start multi-thread scan with {thread_count} threads | 启动{thread_count}线程多线程扫描")
-
-        with ThreadPoolExecutor(max_workers=thread_count) as executor:
-            # Submit tasks | 提交任务
-            future_to_url = {executor.submit(scan_single_url, url): url for url in url_list}
-            # Get results | 获取结果
-            for future in as_completed(future_to_url):
-                url = future_to_url[future]
-                try:
-                    result = future.result()
-                    scan_results.append(result)
-                except Exception as e:
-                    logger.error(f"Scan task failed | 扫描任务失败: {url}, error: {traceback.format_exc()}")
-                    scan_results.append({
-                        "raw_url": url,
-                        "standard_url": "",
-                        "jump_chain": [],
-                        "main_class": "Error",
-                        "sub_class": "Task Execution Error | 任务执行错误",
-                        "error_msg": str(e),
-                        "error_code": "TASK_ERROR",
-                        "auth_required": False,
-                        "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-
-        # Export results to Excel | 导出结果到Excel
-        export_to_excel(scan_results)
-
-        # Generate statistics | 生成统计数据
-        generate_statistics(scan_results)
-
-        logger.info("Scan completed successfully | 扫描任务全部完成！")
-
+        return processed
     except Exception as e:
-        logger.error(f"Main function error | 主函数执行错误: {traceback.format_exc()}")
+        logger.warning(f"Could not read processed URLs: {e}")
+        return set()
+
+# -------------------------- 7. Main Function --------------------------
+def main():
+    parse_command_line_args()
+    if not os.path.exists(CONFIG["input_excel_path"]):
+        logger.error(f"Input file not found: {CONFIG['input_excel_path']}")
+        return
+
+    # Load URLs from Excel
+    try:
+        wb = load_workbook(CONFIG["input_excel_path"], read_only=True)
+        ws = wb[CONFIG["input_sheet_name"]]
+        url_column = CONFIG["url_column"]
+        col_idx = ord(url_column.upper()) - 64 if len(url_column) == 1 else None
+        if not col_idx:
+            logger.error("Invalid url_column config, use 'A' as fallback")
+            col_idx = 1
+        url_list = []
+        for row in ws.iter_rows(min_row=1, values_only=True):
+            if row and len(row) >= col_idx:
+                val = row[col_idx-1]
+                if val and isinstance(val, str) and val.strip():
+                    url_list.append(val.strip())
+        wb.close()
+    except Exception as e:
+        logger.error(f"Failed to read input Excel: {e}")
+        return
+
+    # Deduplicate
+    url_list = list(set(url_list))
+    # Breakpoint resume
+    processed = get_processed_urls(CONFIG["output_excel_path"])
+    pending = [u for u in url_list if u not in processed]
+    logger.info(f"Total URLs: {len(url_list)}, Already processed: {len(processed)}, Pending: {len(pending)}")
+    if not pending:
+        logger.info("All URLs already processed. Exiting.")
+        return
+
+    # Multi-thread scan
+    results = []
+    with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as executor:
+        future_to_url = {executor.submit(scan_single_url, url): url for url in pending}
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                res = future.result()
+                results.append(res)
+                logger.info(f"Completed: {url} -> {res['main_class']}")
+            except Exception as e:
+                logger.error(f"Task failed for {url}: {traceback.format_exc()}")
+                results.append({
+                    "raw_url": url, "standard_url": "", "jump_chain": [],
+                    "main_class": "Error", "sub_class": "Task Exception",
+                    "error_msg": str(e), "error_code": "TASK_ERROR",
+                    "processing_status": "Failed", "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+
+    # Export and statistics
+    export_to_excel(results)
+    generate_statistics(results)
+    logger.info("All tasks completed.")
 
 if __name__ == "__main__":
     main()
