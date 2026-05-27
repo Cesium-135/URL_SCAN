@@ -1,4 +1,4 @@
-V1 Prompt
+#V1 Prompt
 PLEASE NOTE:
 Since I had multiple rounds of conversations with the LLM, to modify the code step by step to meet our needs, 
 And it's also in Chinese, so it is difficult to provide the original prompt accurately to you.
@@ -65,17 +65,48 @@ Simplified English Vesion (for re-generating code)
 Write a Python script using Playwright and openpyxl to read URLs from Excel, simulate browser access, capture full redirection chain including auto redirect and click-triggered redirect to Espace/login, classify into Public front → Espace → Authentication → Backend/API, support EN/FR pages only, record full jump path, merge click jump chain, export summary and detail Excel, with breakpoint resume, retry, bilingual comments.
 
 
-V2 Prompt
-这个仓库里script.py是我现在版本的URL扫描脚本，帮我分析它。
-这段脚本现在存在以下问题：
-1.脚本的输入方式太原始，文件路径配置仍是写死的，不方便调试与部署。请帮我修改为可以指定路径输入输出的方式，并有相关中英文提示。如果未提供路径则要求输入。
-2.脚本中的注释、输出提示、最终结果文件的标题与分类，都存在只有中文的情况。帮我做严格中英文输出。
-3.脚本存在一些未处理的问题，例如有些页面初次访问时要求同意cookie，但现有脚本未处理，导致页面卡住无法处理。
-4.脚本无法处理一些其他情况：有些后台管理页面访问时即要求提供账号密码/证书，虽然脚本无法处理，但需要记录这些，并且保证访问后能正常关闭浏览器。
-5.脚本对于访问错误的URL，希望有更详细的分类，可以把Error message里的错误码比如ERR_CONNECTION_CLOSED单独一列记录下来，每一类都要清楚地记录原始错误码。
-6.现有分类过于粗放，只有Authentication、Espace、Public front和Backend/API，对于每一类，现有大类分类已经不错。我还希望能更详细的分类，但我不知道以什么依据。
-7.脚本未来计划在云服务器上部署，因此需要修改输入输出以适配。
-8.当脚本运行完成后，可以输出详细的统计数据，包括各类URL分类的数量、占比图表、日志等。
-9.这段脚本目前是单线程，现有超时时间配置下，大约每10秒扫描一个URL。将它优化为多线程，以提升扫描速度。
 
-请先阅读我提供的python脚本，结合我的要求，在最小改动现有脚本的前提下，完成优化方案。
+#V2 Prompt
+I have a Python script (script.py) that reads a list of URLs from an Excel file, simulates a real browser (Playwright) to visit each URL, captures the full redirection chain (including automatic redirects and clicks), classifies each URL into categories, and writes the results to an Excel file. The current version has several problems that need to be fixed. Below are the issues and the specific improvements I require.
+
+Existing problems with the current script:
+Hard‑coded file paths – The input/output Excel paths are hard‑coded, making debugging and deployment difficult.
+→ Change to accept command‑line arguments (-i and -o) and prompt interactively if not provided. Use bilingual (English/Chinese) hints.
+Insufficient bilingual output – Many comments, console messages, and Excel headers are only in Chinese.
+→ Make all comments, logs, console output, and Excel headers strictly bilingual (English + Chinese).
+Cookie consent popups not handled – Some pages get stuck because they require accepting cookies.
+→ Add automatic cookie consent handling (EN/FR keywords, main frame + iframes, retry mechanism).
+Pages requiring login/certificates – Some backend/admin pages ask for credentials or client certificates. The script cannot handle them, but it must detect and record this requirement, then close the browser cleanly.
+→ Detect authentication/certificate prompts and set a flag auth_required = True. Ensure the browser always closes properly.
+Poor error classification – Only a generic error is recorded. Need to extract the specific error code (e.g., ERR_CONNECTION_CLOSED, HTTP status codes) and store it in a separate column.
+→ Extract error codes using regex, classify the error type (Connection Error, Timeout Error, Certificate Error, 4XX/5XX, Auth Required), and add columns for “Error Code” and “Error Sub‑Category”.
+Coarse classification – Currently only 4 main categories: Public front, Espace, Authentication, Backend/API. I need finer sub‑categories, but I don’t know the exact criteria.
+→ Keep the 4 main categories but add a sub_class field. Define sub‑categories based on URL keywords and page features (e.g., for Authentication: SSO/Auth Service, Login Page, Token/Credential). Provide configuration rules so sub‑categories can be adjusted later.
+Cloud server deployment – The script will run on a cloud server (headless, no GUI).
+→ Support headless mode, proxy configuration, ignore HTTPS errors, save logs and charts as files.
+No final statistics or charts – After scanning, only the Excel file is produced. Need detailed statistics and visual charts.
+→ Print statistics (total, success/fail, auth required, category distribution, error code distribution) and generate a PNG chart (pie chart for main categories + bar chart for error codes) with count labels and professional brand colours.
+Single‑threaded, slow – With current timeout, it processes about one URL every 10 seconds.
+→ Optimize with multi‑threading (configurable concurrency, default 10–30 threads) while keeping resource cleanup safe.
+
+Additional improvements (derived from later discussions):
+Breakpoint resume – If the output Excel already exists, skip already processed URLs to avoid re‑scanning.
+→ Read the “Status” column of the summary sheet; only process URLs that are not already marked “Success”.
+Click simulation enhancements – For sites that require a button click to reach Espace or login pages, automatically locate and click the element (EN/FR keywords, priority selectors). Capture jumps that open in new windows/tabs and merge them into the full chain.
+Error robustness – Avoid Page.content: Target page, context or browser has been closed errors. Use safe cleanup and avoid fetching intermediate page HTML that might close the context.
+Chart styling – Apply the official BNP Paribas brand colours (green primary palette) to the pie and bar charts. Show both count and percentage on the pie chart, and count labels on top of each bar in the bar chart.
+Configuration flexibility – All parameters (timeout, retries, headless, proxy, click keywords, cookie keywords, classification rules, Excel column letter, etc.) must be grouped at the top of the script in a CONFIG dictionary. No hard‑coded values inside functions.
+Testing – Provide a separate test script (or instructions) that can generate a simulated set of scan results to verify the chart generation without actually running the browser.
+
+Deliverables:
+A complete, well‑commented Python script (script.py) that implements all of the above.
+An updated README.md describing usage, installation, configuration, and output.
+(Optional) A test script that demonstrates the chart generation using mock data.
+
+Environment: Python 3.8+, Playwright, openpyxl, matplotlib. The script must work on Windows and Linux (cloud server) with headless Chromium.
+
+Output Excel: Two sheets – summary (one row per URL with all metadata) and jump_chain (one row per redirection step). Bilingual headers.
+
+Output chart: PNG file with pie chart (main category distribution) and bar chart (error code distribution) using BNPP green colours and numeric labels.
+
+Important: The final script must be stable, handle timeouts and network errors gracefully, and not leak browser processes.
